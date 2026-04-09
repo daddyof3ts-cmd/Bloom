@@ -1,0 +1,12 @@
+.gcloudignore
+.git
+.gitignore
+.env
+.env.*
+node_modules/
+src/
+public/
+# Do not upload the TS/Vite config needed for Dev, only the deployed version
+vite.config.ts
+tsconfig.json
+tsconfig.node.json

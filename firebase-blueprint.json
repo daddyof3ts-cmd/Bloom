@@ -1,0 +1,56 @@
+{
+  "entities": {
+    "InventoryItem": {
+      "title": "Inventory Item",
+      "description": "A single item in the inventory system.",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string", "description": "The name of the item." },
+        "vendor": { "type": "string", "description": "The vendor or supplier." },
+        "weight": { "type": "string", "description": "The weight or unit size (e.g., 5lbs, 1kg)." },
+        "quantity": { "type": "number", "description": "The current quantity in stock." },
+        "program": { "type": "string", "enum": ["Open-Hours", "Grocery"], "description": "The program this item belongs to." },
+        "lastUpdated": { "type": "string", "format": "date-time", "description": "The last time this item was updated." }
+      },
+      "required": ["name", "quantity", "program"]
+    },
+    "ProgramTransfer": {
+      "title": "Program Transfer",
+      "description": "A record of stock moving between programs.",
+      "type": "object",
+      "properties": {
+        "itemId": { "type": "string", "description": "The ID of the inventory item." },
+        "fromProgram": { "type": "string", "enum": ["Open-Hours", "Grocery"] },
+        "toProgram": { "type": "string", "enum": ["Open-Hours", "Grocery"] },
+        "amount": { "type": "number" },
+        "timestamp": { "type": "string", "format": "date-time" }
+      },
+      "required": ["itemId", "fromProgram", "toProgram", "amount", "timestamp"]
+    },
+    "ArchiveCheckpoint": {
+      "title": "Archive Checkpoint",
+      "description": "A snapshot of the inventory state at a specific time.",
+      "type": "object",
+      "properties": {
+        "timestamp": { "type": "string", "format": "date-time" },
+        "items": { "type": "array", "items": { "type": "object" }, "description": "The snapshot of all items." },
+        "totalValue": { "type": "number", "description": "Optional total value calculation." }
+      },
+      "required": ["timestamp", "items"]
+    }
+  },
+  "firestore": {
+    "/inventory": {
+      "schema": "InventoryItem",
+      "description": "The main inventory collection."
+    },
+    "/transfers": {
+      "schema": "ProgramTransfer",
+      "description": "Log of all stock transfers."
+    },
+    "/checkpoints": {
+      "schema": "ArchiveCheckpoint",
+      "description": "Archived inventory snapshots."
+    }
+  }
+}

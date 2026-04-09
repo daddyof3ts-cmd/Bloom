@@ -1,0 +1,8 @@
+{
+  "name": "Lumina Inventory",
+  "description": "A high-performance inventory management system with AI-powered voice intake, invoice OCR, and seamless stock transfers between programs.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone"
+  ]
+}

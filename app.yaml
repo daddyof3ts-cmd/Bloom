@@ -1,0 +1,8 @@
+runtime: nodejs20
+env: standard
+
+# By default, Node.js App Engine looks for a "start" script in package.json
+handlers:
+  # Route requests to the Express application
+  - url: /.*
+    script: auto

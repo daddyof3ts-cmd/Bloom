@@ -1,0 +1,75 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // ===============================================================
+    // Assumed Data Model
+    // ===============================================================
+    //
+    // Collection: inventory
+    // Fields:
+    //   - name: string (required)
+    //   - vendor: string (optional)
+    //   - weight: string (optional)
+    //   - quantity: number (required)
+    //   - program: string (required, enum: ["Open-Hours", "Grocery"])
+    //   - lastUpdated: timestamp (required)
+    //
+    // Collection: transfers
+    // Fields:
+    //   - itemId: string (required)
+    //   - fromProgram: string (required)
+    //   - toProgram: string (required)
+    //   - amount: number (required)
+    //   - timestamp: timestamp (required)
+    //
+    // Collection: checkpoints
+    // Fields:
+    //   - timestamp: timestamp (required)
+    //   - items: list (required)
+    //
+    // ===============================================================
+
+    // Helper Functions
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isValidInventory(data) {
+      return data.name is string && data.name.size() > 0 && data.name.size() < 200 &&
+             data.quantity is number && data.quantity >= 0 &&
+             data.program in ["Open-Hours", "Grocery"] &&
+             data.lastUpdated is timestamp;
+    }
+
+    function isValidTransfer(data) {
+      return data.itemId is string &&
+             data.fromProgram in ["Open-Hours", "Grocery"] &&
+             data.toProgram in ["Open-Hours", "Grocery"] &&
+             data.amount is number && data.amount > 0 &&
+             data.timestamp is timestamp;
+    }
+
+    function isValidCheckpoint(data) {
+      return data.timestamp is timestamp &&
+             data.items is list && data.items.size() < 1000;
+    }
+
+    // Rules
+    match /inventory/{itemId} {
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated() && isValidInventory(request.resource.data);
+      allow update: if isAuthenticated() && isValidInventory(request.resource.data);
+      allow delete: if isAuthenticated();
+    }
+
+    match /transfers/{transferId} {
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated() && isValidTransfer(request.resource.data);
+    }
+
+    match /checkpoints/{checkpointId} {
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated() && isValidCheckpoint(request.resource.data);
+    }
+  }
+}
