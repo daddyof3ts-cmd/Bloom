@@ -1,5 +1,5 @@
 <div align="center">
-  <h1 style="color: maroon">Lumina Inventory System</h1>
+  <h1 style="color: maroon">Bloom Inventory System</h1>
   <p>A resilient, offline-capable inventory management system optimized for the Virginia Tech Food Pantry.</p>
 </div>
 

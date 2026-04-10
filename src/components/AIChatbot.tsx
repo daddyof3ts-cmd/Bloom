@@ -13,7 +13,7 @@ export function AIChatbot({ inventory }: AIChatbotProps) {
   const [isOpen, setIsOpen] = useState(false);
   const [input, setInput] = useState('');
   const [messages, setMessages] = useState<{ id: string; role: 'user' | 'bot'; content: string }[]>([
-    { id: 'initial-msg', role: 'bot', content: 'Hello! I am Lumina AI. How can I help you with your inventory today?' }
+    { id: 'initial-msg', role: 'bot', content: 'Hello! I am Bloom AI. How can I help you with your inventory today?' }
   ]);
   const [isTyping, setIsTyping] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -71,7 +71,7 @@ export function AIChatbot({ inventory }: AIChatbotProps) {
                 <Bot className="w-6 h-6" />
               </div>
               <div>
-                <h3 className="font-bold text-slate-800">Lumina AI</h3>
+                <h3 className="font-bold text-slate-800">Bloom AI</h3>
                 <p className="text-xs text-slate-500">Inventory Assistant</p>
               </div>
             </div>
@@ -122,7 +122,7 @@ export function AIChatbot({ inventory }: AIChatbotProps) {
             <div className="relative">
               <input
                 type="text"
-                placeholder="Ask Lumina anything..."
+                placeholder="Ask Bloom anything..."
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
                 onKeyDown={(e) => e.key === 'Enter' && handleSend()}

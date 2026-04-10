@@ -55,7 +55,7 @@ export default function App() {
     
     // Offline / Local Storage Mode (Bypass Firebase completely)
     if (isGuest && !user) {
-      const saved = localStorage.getItem('lumina_offline_inventory');
+      const saved = localStorage.getItem('bloom_offline_inventory');
       if (saved) {
         try {
           // Parse and restore Timestamp objects if possible, or just raw data
@@ -96,7 +96,7 @@ export default function App() {
   // Sync to purely local storage when in Guest mode
   useEffect(() => {
     if (isGuest && !user) {
-      localStorage.setItem('lumina_offline_inventory', JSON.stringify(inventory));
+      localStorage.setItem('bloom_offline_inventory', JSON.stringify(inventory));
     }
   }, [inventory, isGuest, user]);
 
@@ -106,7 +106,7 @@ export default function App() {
       const result = await signInWithPopup(auth, provider);
       
       // Sync local storage data if it exists
-      const saved = localStorage.getItem('lumina_offline_inventory');
+      const saved = localStorage.getItem('bloom_offline_inventory');
       if (saved && result.user) {
         try {
           const parsed = JSON.parse(saved);
@@ -122,7 +122,7 @@ export default function App() {
               });
             }
             await batch.commit();
-            localStorage.removeItem('lumina_offline_inventory');
+            localStorage.removeItem('bloom_offline_inventory');
             alert(`🎉 Migration Complete! Successfully synced ${parsed.length} offline items to the cloud!`);
           }
         } catch (e) {
@@ -291,7 +291,7 @@ export default function App() {
           <div className="w-20 h-20 bg-maroon-600 rounded-3xl flex items-center justify-center mx-auto mb-8 shadow-xl shadow-maroon-500/20">
             <Package className="w-10 h-10 text-white" />
           </div>
-          <h1 className="text-4xl font-bold text-slate-900 mb-4">Lumina</h1>
+          <h1 className="text-4xl font-bold text-slate-900 mb-4">Bloom</h1>
           <p className="text-slate-500 mb-12">Intelligent Inventory Management for Modern Programs</p>
           <button
             onClick={handleLogin}
@@ -345,7 +345,7 @@ export default function App() {
           <div className="p-2 bg-maroon-600 rounded-xl text-white shadow-md pointer-events-auto">
             <Package className="w-6 h-6" />
           </div>
-          <h1 className="text-2xl font-bold text-slate-900 tracking-tight pointer-events-auto">Lumina</h1>
+          <h1 className="text-2xl font-bold text-slate-900 tracking-tight pointer-events-auto">Bloom</h1>
         </div>
       </header>
 

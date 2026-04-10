@@ -18,5 +18,5 @@ app.get('*', (req, res) => {
 // Use port 8080 as expected by Google Cloud App Engine Standard Environment
 const port = process.env.PORT || 8080;
 app.listen(port, () => {
-    console.log(`Lumina server logic listening on port ${port}`);
+    console.log(`Bloom server logic listening on port ${port}`);
 });
