@@ -2,6 +2,7 @@ import { useState, useRef, useEffect } from 'react';
 import { MessageCircle, Send, X, Loader2, Bot, User, Search, Mic, MicOff, Volume2, VolumeX } from 'lucide-react';
 import { GoogleGenAI } from '@google/genai';
 import Markdown from 'react-markdown';
+import { GEMINI_MODEL } from '@/src/config/gemini';
 import { cn } from '@/src/lib/utils';
 import { InventoryItem } from '@/src/types';
 
@@ -13,7 +14,7 @@ export function AIChatbot({ inventory }: AIChatbotProps) {
   const [isOpen, setIsOpen] = useState(false);
   const [input, setInput] = useState('');
   const [messages, setMessages] = useState<{ id: string; role: 'user' | 'bot'; content: string }[]>([
-    { id: 'initial-msg', role: 'bot', content: 'Hello! I am Bloom AI. How can I help you with your inventory today?' }
+    { id: 'initial-msg', role: 'bot', content: 'Hello! I am Bloom. How can I help with pantry inventory today?' }
   ]);
   const [isTyping, setIsTyping] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -70,7 +71,7 @@ export function AIChatbot({ inventory }: AIChatbotProps) {
       }
       const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY! });
       const response = await ai.models.generateContent({
-        model: 'gemini-3.1-pro',
+        model: GEMINI_MODEL,
         contents: `You are an inventory assistant. Current inventory context: ${JSON.stringify(inventory)}. 
         User question: "${userMsg}". 
         Provide helpful technical support or find specific information from the inventory instantly.`,

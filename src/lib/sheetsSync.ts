@@ -1,39 +1,113 @@
 import { InventoryItem } from '@/src/types';
 
-// IMPORTANT: Replace this URL with your deployed Google Apps Script Web App URL
-// Instructions for Apps Script:
-// 1. Go to script.google.com and create a new project
-// 2. Paste the following code:
-/*
-  function doPost(e) {
-    var sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
-    var data = JSON.parse(e.postData.contents);
-    sheet.appendRow([new Date(), data.action, data.item.name, data.item.program, data.item.quantity, data.item.vendor]);
-    return ContentService.createTextOutput(JSON.stringify({status: "success"})).setMimeType(ContentService.MimeType.JSON);
-  }
-*/
-// 3. Deploy as Web App -> Execute as "Me" -> Who has access "Anyone"
-// 4. Paste the Web App URL below
-const SHEETS_WEBHOOK_URL = ''; 
+export type SheetsAction =
+  | 'ADD'
+  | 'UPDATE'
+  | 'DELETE'
+  | 'TRANSFER'
+  | 'ROLLOVER'
+  | 'CHECKPOINT';
 
-export const syncToSheets = async (action: 'ADD' | 'UPDATE' | 'DELETE' | 'TRANSFER', item: Partial<InventoryItem> | any) => {
-  if (!SHEETS_WEBHOOK_URL) return; // Silent return if not configured
+const QUEUE_KEY = 'bloom_sheets_queue';
 
+type QueuedSync = {
+  action: SheetsAction;
+  timestamp: string;
+  item: Partial<InventoryItem> | Record<string, unknown>;
+};
+
+function getWebhookUrl(): string {
+  const v = import.meta.env.VITE_SHEETS_WEBHOOK_URL;
+  return typeof v === 'string' ? v.trim() : '';
+}
+
+function loadQueue(): QueuedSync[] {
   try {
-    await fetch(SHEETS_WEBHOOK_URL, {
-      method: 'POST',
-      mode: 'no-cors', // Necessary to avoid CORS issues when posting to simple AppScripts from client
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        action,
-        timestamp: new Date().toISOString(),
-        item
-      })
-    });
-    console.log('[SheetsSync] Request dispatched to Google Sheets for:', action, item.name);
-  } catch (error) {
-    console.error('[SheetsSync] Failed to dispatch to Google Sheets', error);
+    const raw = localStorage.getItem(QUEUE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw) as QueuedSync[];
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
   }
+}
+
+function saveQueue(q: QueuedSync[]) {
+  localStorage.setItem(QUEUE_KEY, JSON.stringify(q));
+}
+
+/**
+ * Best-effort flush. Uses `no-cors` to Apps Script; network errors keep the queue.
+ * Call on app load and on `online` so offline mutations retry later.
+ */
+export async function flushSheetsQueue(): Promise<void> {
+  const url = getWebhookUrl();
+  if (!url) return;
+
+  let q = loadQueue();
+  while (q.length > 0) {
+    const first = q[0];
+    try {
+      await fetch(url, {
+        method: 'POST',
+        mode: 'no-cors',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: first.action,
+          timestamp: first.timestamp,
+          item: first.item,
+        }),
+      });
+      q = q.slice(1);
+      saveQueue(q);
+      console.log('[SheetsSync] Dispatched queued:', first.action);
+    } catch (error) {
+      console.error('[SheetsSync] Flush failed, will retry later', error);
+      break;
+    }
+  }
+}
+
+/**
+ * Silent sync: always append to local queue, then attempt immediate send when URL is set.
+ *
+ * Example Apps Script `doPost` (extend for ROLLOVER — e.g. copy active sheet to "Archive YYYY-MM"):
+ *
+ *   function doPost(e) {
+ *     var ss = SpreadsheetApp.getActiveSpreadsheet();
+ *     var data = JSON.parse(e.postData.contents);
+ *     if (data.action === 'ROLLOVER') {
+ *       var sh = ss.getActiveSheet();
+ *       var archive = ss.insertSheet('Archive ' + new Date().toISOString().slice(0, 10));
+ *       sh.copyTo(ss).setName('Baseline ' + new Date().toISOString().slice(0, 10)); // adjust to your workflow
+ *       return ContentService.createTextOutput(JSON.stringify({ ok: true })).setMimeType(ContentService.MimeType.JSON);
+ *     }
+ *     var sheet = ss.getActiveSheet();
+ *     var row = data.item.name ? [new Date(), data.action, data.item.name, data.item.program, data.item.quantity, data.item.vendor] : [new Date(), data.action, JSON.stringify(data.item)];
+ *     sheet.appendRow(row);
+ *     return ContentService.createTextOutput(JSON.stringify({ ok: true })).setMimeType(ContentService.MimeType.JSON);
+ *   }
+ *
+ * Deploy Web App: Execute as Me, access Anyone
+ */
+export const syncToSheets = async (
+  action: SheetsAction,
+  item: Partial<InventoryItem> | Record<string, unknown>
+) => {
+  const entry: QueuedSync = {
+    action,
+    timestamp: new Date().toISOString(),
+    item,
+  };
+  const q = loadQueue();
+  q.push(entry);
+  saveQueue(q);
+
+  const url = getWebhookUrl();
+  if (!url) {
+    console.warn('[SheetsSync] VITE_SHEETS_WEBHOOK_URL not set; queued for later');
+    return;
+  }
+
+  await flushSheetsQueue();
 };

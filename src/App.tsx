@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { 
   collection, 
   onSnapshot, 
@@ -16,6 +16,7 @@ import { signInWithPopup, GoogleAuthProvider, onAuthStateChanged, User } from 'f
 import { db, auth } from './firebase';
 import { InventoryItem, Program } from './types';
 import { InventoryTable } from './components/InventoryTable';
+import { MergeDuplicatesModal } from './components/MergeDuplicatesModal';
 import { VoiceIntake } from './components/VoiceIntake';
 import { InvoiceOCR } from './components/InvoiceOCR';
 import { AIChatbot } from './components/AIChatbot';
@@ -25,9 +26,16 @@ import { HistoryModal } from './components/HistoryModal';
 import { GlassCard } from './components/GlassCard';
 import { ExcelImport } from './components/ExcelImport';
 import { PhotoStockUpdate } from './components/PhotoStockUpdate';
-import { syncToSheets } from './lib/sheetsSync';
-import { LogIn, LogOut, Package, Plus, Sparkles, LayoutDashboard, History } from 'lucide-react';
+import { syncToSheets, flushSheetsQueue } from './lib/sheetsSync';
+import { parseVoiceInventoryPayload } from './lib/voicePayload';
+import { countIncompleteItems } from './lib/inventoryCompleteness';
+import { saveGuestCheckpoint } from './lib/localCheckpoints';
+import { unitsByCategory, countLowStock, LOW_STOCK_THRESHOLD } from './lib/inventoryStats';
+import { toast } from 'sonner';
+import { LogIn, LogOut, Package, Plus, Sparkles, LayoutDashboard, ListMinus, Boxes, AlertTriangle, TrendingDown } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
+import { BulkStockRemoveModal } from './components/BulkStockRemoveModal';
+import { InventoryCharts } from './components/InventoryCharts';
 
 export default function App() {
   const [user, setUser] = useState<User | null>(null);
@@ -38,6 +46,69 @@ export default function App() {
   const [isGuest, setIsGuest] = useState(false);
   const [transferItem, setTransferItem] = useState<InventoryItem | null>(null);
   const [prefillData, setPrefillData] = useState<any>(null);
+  const [showMergeModal, setShowMergeModal] = useState(false);
+  const [editItem, setEditItem] = useState<InventoryItem | null>(null);
+  const [showBulkRemove, setShowBulkRemove] = useState(false);
+
+  type ItemPatch = Partial<Pick<InventoryItem, 'name' | 'vendor' | 'weight' | 'category' | 'pricing' | 'quantity' | 'program'>>;
+
+  const updateItem = async (id: string, patch: ItemPatch) => {
+    const existing = inventory.find((i) => i.id === id);
+    if (!existing) return;
+    const merged: InventoryItem = {
+      ...existing,
+      ...patch,
+      lastUpdated: Timestamp.now(),
+    };
+    if (isGuest && !user) {
+      setInventory((prev) => prev.map((i) => (i.id === id ? merged : i)));
+    } else {
+      try {
+        await updateDoc(doc(db, 'inventory', id), {
+          ...patch,
+          lastUpdated: Timestamp.now(),
+        });
+      } catch (error) {
+        console.warn('Firebase update failed:', error);
+        toast.error('Failed to update item.');
+      }
+    }
+    void syncToSheets('UPDATE', merged);
+  };
+
+  const mergeItems = async (keepId: string, removeId: string) => {
+    const keep = inventory.find((i) => i.id === keepId);
+    const remove = inventory.find((i) => i.id === removeId);
+    if (!keep || !remove) return;
+    const newQty = keep.quantity + remove.quantity;
+
+    if (isGuest && !user) {
+      setInventory((prev) => {
+        const next = prev.filter((i) => i.id !== removeId);
+        return next.map((i) =>
+          i.id === keepId
+            ? { ...i, quantity: newQty, lastUpdated: Timestamp.now() }
+            : i
+        );
+      });
+    } else {
+      try {
+        const batch = writeBatch(db);
+        batch.update(doc(db, 'inventory', keepId), {
+          quantity: newQty,
+          lastUpdated: Timestamp.now(),
+        });
+        batch.delete(doc(db, 'inventory', removeId));
+        await batch.commit();
+      } catch (e) {
+        console.warn('Merge failed:', e);
+        toast.error('Failed to merge items.');
+        return;
+      }
+    }
+    void syncToSheets('DELETE', remove);
+    void syncToSheets('UPDATE', { ...keep, quantity: newQty, lastUpdated: Timestamp.now() });
+  };
 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, (u) => {
@@ -45,6 +116,13 @@ export default function App() {
       setIsAuthReady(true);
     });
     return () => unsubscribe();
+  }, []);
+
+  useEffect(() => {
+    void flushSheetsQueue();
+    const onOnline = () => void flushSheetsQueue();
+    window.addEventListener('online', onOnline);
+    return () => window.removeEventListener('online', onOnline);
   }, []);
 
   useEffect(() => {
@@ -123,7 +201,7 @@ export default function App() {
             }
             await batch.commit();
             localStorage.removeItem('bloom_offline_inventory');
-            alert(`🎉 Migration Complete! Successfully synced ${parsed.length} offline items to the cloud!`);
+            toast.success(`Synced ${parsed.length} offline items to the cloud.`);
           }
         } catch (e) {
           console.error("Failed to migrate offline inventory", e);
@@ -131,7 +209,9 @@ export default function App() {
       }
     } catch (error: any) {
       console.error('Login failed:', error);
-      alert(`Login failed: ${error?.message || 'Unknown error'}\n\nMake sure Google Auth is enabled in your Firebase Console!`);
+      toast.error(
+        `Login failed: ${error?.message || 'Unknown error'}. Ensure Google Auth is enabled in Firebase.`
+      );
     }
   };
 
@@ -146,10 +226,10 @@ export default function App() {
         await addDoc(collection(db, 'inventory'), newItem);
       } catch (error) {
         console.warn('Firebase add bypassed:', error);
-        alert('Failed to add item to database.');
+        toast.error('Failed to add item to database.');
       }
     }
-    syncToSheets('ADD', data);
+    void syncToSheets('ADD', data);
   };
 
   const deleteItem = async (id: string) => {
@@ -161,10 +241,52 @@ export default function App() {
         await deleteDoc(doc(db, 'inventory', id));
       } catch (error) {
         console.warn('Firebase delete bypassed:', error);
-        alert('Failed to delete item from database.');
+        toast.error('Failed to delete item from database.');
       }
     }
-    if (itemToDelete) syncToSheets('DELETE', itemToDelete);
+    if (itemToDelete) void syncToSheets('DELETE', itemToDelete);
+  };
+
+  const applyBulkSubtract = async (ops: { id: string; subtract: number }[]) => {
+    if (ops.length === 0) return;
+    const next = inventory.map((i) => ({ ...i }));
+    for (const { id, subtract } of ops) {
+      const idx = next.findIndex((x) => x.id === id);
+      if (idx >= 0) {
+        next[idx] = {
+          ...next[idx],
+          quantity: Math.max(0, next[idx].quantity - subtract),
+          lastUpdated: Timestamp.now(),
+        };
+      }
+    }
+
+    if (isGuest && !user) {
+      setInventory(next);
+      const touched = new Set(ops.map((o) => o.id));
+      for (const id of touched) {
+        const item = next.find((i) => i.id === id);
+        if (item) void syncToSheets('UPDATE', item);
+      }
+      return;
+    }
+
+    const touched = new Set(ops.map((o) => o.id));
+    for (const id of touched) {
+      const newItem = next.find((i) => i.id === id);
+      if (!newItem) continue;
+      try {
+        await updateDoc(doc(db, 'inventory', id), {
+          quantity: newItem.quantity,
+          lastUpdated: Timestamp.now(),
+        });
+      } catch (e) {
+        console.warn('Bulk subtract failed', e);
+        toast.error('Failed to update one or more items.');
+        throw e;
+      }
+      void syncToSheets('UPDATE', newItem);
+    }
   };
 
   const handleTransfer = async (amount: number, toProgram: Program) => {
@@ -242,76 +364,95 @@ export default function App() {
         console.warn('Firebase transfer bypassed:', e);
       }
     }
-    syncToSheets('TRANSFER', {
+    void syncToSheets('TRANSFER', {
       name: transferItem.name,
       fromProgram: transferItem.program,
       toProgram,
-      amount
+      amount,
     });
   };
 
   const handleArchive = async () => {
     if (inventory.length === 0) return;
-    
-    // Check if there are strictly any active items to archive
-    if (!inventory.some(i => i.quantity > 0)) {
-      alert('All items are already zero. Add stock before creating a new baseline.');
+
+    if (!inventory.some((i) => i.quantity > 0)) {
+      toast.error('All items are already zero. Add stock before creating a new baseline.');
       return;
     }
 
-    alert('End of period totals calculated and checkpoint saved! Existing stock carried forward.');
+    const snapshotAt = new Date().toISOString();
 
-    try {
-      await addDoc(collection(db, 'checkpoints'), {
-        timestamp: Timestamp.now(),
-        items: inventory
-      });
-      // We no longer zero out the quantities because we are carrying remaining stock forward
-    } catch (error) {
-      console.warn('Archive Firebase sync bypassed:', error);
+    if (isGuest && !user) {
+      saveGuestCheckpoint(inventory);
+      toast.success('Checkpoint saved on this device. Existing stock carried forward.');
+    } else {
+      try {
+        await addDoc(collection(db, 'checkpoints'), {
+          timestamp: Timestamp.now(),
+          items: inventory,
+        });
+        toast.success('Checkpoint saved. Existing stock carried forward.');
+      } catch (error) {
+        console.warn('Archive Firebase sync bypassed:', error);
+        toast.error('Could not save checkpoint to cloud.');
+        return;
+      }
     }
+
+    void syncToSheets('ROLLOVER', {
+      items: inventory,
+      snapshotAt,
+      mode: isGuest && !user ? 'guest' : 'firebase',
+    });
   };
+
+  const incompleteCount = countIncompleteItems(inventory);
+  const categoryRows = useMemo(() => unitsByCategory(inventory), [inventory]);
+  const lowStockLines = useMemo(() => countLowStock(inventory), [inventory]);
 
   if (!isAuthReady) {
     return (
-      <div className="min-h-screen flex items-center justify-center">
-        <div className="w-12 h-12 border-4 border-maroon-600 border-t-transparent rounded-full animate-spin" />
+      <div className="flex min-h-screen items-center justify-center bg-white">
+        <div className="h-12 w-12 animate-spin rounded-full border-4 border-maroon-100 border-t-maroon-600" />
       </div>
     );
   }
 
   if (!user && !isGuest) {
     return (
-      <div className="min-h-screen flex flex-col items-center justify-center p-4">
+      <div className="flex min-h-screen flex-col items-center justify-center bg-white p-4">
         <motion.div
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
-          className="w-full max-w-md liquid-glass rounded-[40px] p-12 text-center shadow-2xl border border-white/30"
+          className="liquid-glass w-full max-w-md rounded-[40px] p-12 text-center shadow-xl"
         >
-          <div className="w-20 h-20 bg-maroon-600 rounded-3xl flex items-center justify-center mx-auto mb-8 shadow-xl shadow-maroon-500/20">
-            <Package className="w-10 h-10 text-white" />
+          <div className="mx-auto mb-8 flex h-20 w-20 items-center justify-center rounded-3xl bg-maroon-600 shadow-lg shadow-maroon-500/20">
+            <Package className="h-10 w-10 text-white" />
           </div>
-          <h1 className="text-4xl font-bold text-slate-900 mb-4">Bloom</h1>
-          <p className="text-slate-500 mb-12">Intelligent Inventory Management for Modern Programs</p>
+          <h1 className="mb-2 text-4xl font-bold tracking-tight text-slate-900">Bloom</h1>
+          <p className="mb-2 text-sm font-medium uppercase tracking-widest text-maroon-600">VT Food Pantry</p>
+          <p className="mb-10 text-slate-500">
+            Inventory for Open-Hours and Grocery — look up lines, checkpoints, and rollovers. No barcodes.
+          </p>
           <button
             onClick={handleLogin}
-            className="w-full py-5 rounded-3xl font-bold text-lg wheat-grass-btn flex items-center justify-center gap-3"
+            className="flex w-full items-center justify-center gap-3 rounded-3xl py-5 text-lg font-bold wheat-grass-btn"
           >
-            <LogIn className="w-6 h-6" />
+            <LogIn className="h-6 w-6" />
             Sign in with Google
           </button>
-          
+
           <div className="mt-6 flex items-center justify-center gap-4">
-            <div className="h-px bg-slate-200 flex-1"></div>
-            <span className="text-sm text-slate-400 font-medium tracking-wide">OR</span>
-            <div className="h-px bg-slate-200 flex-1"></div>
+            <div className="h-px flex-1 bg-slate-200" />
+            <span className="text-xs font-semibold uppercase tracking-widest text-slate-400">or</span>
+            <div className="h-px flex-1 bg-slate-200" />
           </div>
 
           <button
             onClick={() => setIsGuest(true)}
-            className="w-full mt-6 py-4 rounded-3xl font-bold text-lg bg-white/50 text-slate-700 hover:bg-white transition-all border border-slate-200 shadow-sm flex items-center justify-center gap-2"
+            className="mt-6 flex w-full items-center justify-center gap-2 rounded-3xl border border-slate-200 bg-white py-4 text-lg font-bold text-slate-700 shadow-sm transition-colors hover:bg-slate-50"
           >
-            Continue as Guest (Offline Mode)
+            Continue as guest (offline)
           </button>
         </motion.div>
       </div>
@@ -319,132 +460,226 @@ export default function App() {
   }
 
   return (
-    <div className="min-h-screen pb-20">
-      {/* Header */}
-      <header className="sticky top-0 z-40 bg-white/40 backdrop-blur-xl border-b border-white/20 px-8 py-4 flex items-center relative">
-        {/* Left Action Profile */}
-        <div className="flex items-center gap-4 relative z-10">
-          <div className="hidden md:flex items-center gap-3 px-4 py-2 bg-white/50 rounded-2xl border border-white/20 shadow-sm">
-            <img src={user?.photoURL || 'https://www.gravatar.com/avatar/00000000000000000000000000000000?d=mp&f=y'} className="w-8 h-8 rounded-full border border-white/50" referrerPolicy="no-referrer" />
-            <span className="text-sm font-semibold text-slate-700">{user?.displayName || 'Local Guest'}</span>
+    <div className="min-h-screen bg-white pb-24">
+      <header className="sticky top-0 z-40 flex items-center border-b border-slate-200 bg-white/95 px-4 py-3 backdrop-blur-md md:px-8">
+        <div className="relative z-10 flex items-center gap-3">
+          <div className="hidden items-center gap-3 rounded-2xl border border-slate-200 bg-white px-3 py-2 shadow-sm md:flex">
+            <img
+              src={user?.photoURL || 'https://www.gravatar.com/avatar/00000000000000000000000000000000?d=mp&f=y'}
+              className="h-8 w-8 rounded-full border border-slate-200"
+              referrerPolicy="no-referrer"
+              alt=""
+            />
+            <span className="max-w-[160px] truncate text-sm font-semibold text-slate-700">
+              {user?.displayName || 'Local Guest'}
+            </span>
           </div>
           <button
             onClick={() => {
               if (user) handleLogout();
               setIsGuest(false);
             }}
-            className="p-3 hover:bg-red-50 rounded-2xl text-red-600 transition-colors shadow-sm bg-white/30"
-            title="Logout or Exit Guest"
+            className="rounded-2xl border border-slate-200 bg-white p-2.5 text-rose-600 shadow-sm transition-colors hover:bg-rose-50"
+            title="Sign out or exit guest"
+            type="button"
           >
-            <LogOut className="w-6 h-6" />
+            <LogOut className="h-5 w-5" />
           </button>
         </div>
 
-        {/* Centered Logo */}
-        <div className="absolute left-1/2 -translate-x-1/2 flex items-center gap-3 pointer-events-none">
-          <div className="p-2 bg-maroon-600 rounded-xl text-white shadow-md pointer-events-auto">
-            <Package className="w-6 h-6" />
+        <div className="pointer-events-none absolute left-1/2 flex -translate-x-1/2 items-center gap-2">
+          <div className="pointer-events-auto flex items-center gap-2 rounded-xl bg-maroon-600 p-2 text-white shadow-md">
+            <Package className="h-6 w-6" />
           </div>
-          <h1 className="text-2xl font-bold text-slate-900 tracking-tight pointer-events-auto">Bloom</h1>
+          <h1 className="pointer-events-auto text-xl font-bold tracking-tight text-slate-900">Bloom</h1>
         </div>
       </header>
 
-      <main className="max-w-7xl mx-auto px-8 pt-12 space-y-12">
-        {/* Top Section: AI Tools */}
-        <section className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8">
-          <VoiceIntake onExtracted={async (data) => {
-            if (data.name && data.quantity > 0) {
-              await addItem(data);
-              alert(`Voice command successful! Automatically saved ${data.quantity} of ${data.name}.`);
-            } else {
-              setPrefillData(data);
-              setShowAddForm(true);
-            }
-          }} />
-
-          <PhotoStockUpdate 
-            inventory={inventory}
-            onUpdate={async ({ name, quantityChange, itemMatch }) => {
-              if (itemMatch) {
-                if (isGuest && !user) {
-                  setInventory(prev => prev.map(i => i.id === itemMatch.id ? { ...i, quantity: i.quantity + quantityChange, lastUpdated: Timestamp.now() } : i));
-                  alert(`Successfully ${quantityChange >= 0 ? 'added' : 'removed'} ${Math.abs(quantityChange)} ${itemMatch.name}.`);
-                } else {
-                  try {
-                    const { increment } = await import('firebase/firestore');
-                    await updateDoc(doc(db, 'inventory', itemMatch.id), {
-                      quantity: increment(quantityChange),
-                      lastUpdated: Timestamp.now()
-                    });
-                    alert(`Successfully ${quantityChange >= 0 ? 'added' : 'removed'} ${Math.abs(quantityChange)} ${itemMatch.name}.`);
-                  } catch (error) {
-                    alert('Failed to update stock.');
-                  }
-                }
-              } else {
-                if (quantityChange > 0) {
-                  await addItem({ name, quantity: quantityChange, program: 'Grocery' });
-                  alert(`Added ${quantityChange} new units of ${name}.`);
-                } else {
-                  alert(`Cannot subtract ${Math.abs(quantityChange)} instances of unknown item: ${name}`);
-                }
-              }
-            }} 
-          />
-          
-          <GlassCard className="flex flex-col justify-center gap-6 border-maroon-400/30 h-full w-full">
-            <div className="p-4 bg-maroon-100 rounded-3xl w-fit text-maroon-600 shadow-sm">
-              <Sparkles className="w-8 h-8" />
+      <main className="mx-auto max-w-7xl space-y-10 px-4 pb-12 pt-8 md:px-8">
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+          <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+            <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wide text-slate-500">
+              <Boxes className="h-3.5 w-3.5 text-maroon-600" />
+              Line items
             </div>
-            <div>
-              <h2 className="text-2xl font-bold mb-4 text-slate-800">Quick Actions</h2>
-              <div className="space-y-4">
+            <p className="font-mono text-2xl font-bold tabular-nums text-slate-900">{inventory.length}</p>
+          </div>
+          <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+            <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Total units</div>
+            <p className="font-mono text-2xl font-bold tabular-nums text-slate-900">
+              {inventory.reduce((s, i) => s + i.quantity, 0)}
+            </p>
+          </div>
+          <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+            <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wide text-slate-500">
+              <TrendingDown className="h-3.5 w-3.5 text-amber-600" />
+              Low stock (≤{LOW_STOCK_THRESHOLD})
+            </div>
+            <p className={`font-mono text-2xl font-bold tabular-nums ${lowStockLines > 0 ? 'text-amber-600' : 'text-slate-400'}`}>
+              {lowStockLines}
+            </p>
+          </div>
+          <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+            <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wide text-slate-500">
+              <AlertTriangle className="h-3.5 w-3.5 text-rose-500" />
+              Missing detail
+            </div>
+            <p className={`font-mono text-2xl font-bold tabular-nums ${incompleteCount > 0 ? 'text-rose-600' : 'text-slate-400'}`}>
+              {incompleteCount}
+            </p>
+          </div>
+        </div>
+
+        {categoryRows.length > 0 && (
+          <div>
+            <h3 className="mb-2 text-xs font-bold uppercase tracking-wide text-slate-500">Units by category</h3>
+            <div className="flex flex-wrap gap-2">
+              {categoryRows.map((row) => (
+                <div
+                  key={row.name}
+                  className="rounded-full border border-slate-200 bg-slate-50 px-3 py-1.5 text-sm text-slate-800 shadow-sm"
+                >
+                  <span className="font-semibold">{row.name}</span>
+                  <span className="ml-2 font-mono text-maroon-700">{row.units} u</span>
+                  <span className="text-slate-400"> · {row.lines} lines</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        <InventoryCharts items={inventory} />
+
+        <section>
+          <h2 className="mb-4 text-lg font-bold text-slate-800">Add stock</h2>
+          <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
+            <VoiceIntake
+              onExtracted={(data) => {
+                const parsed = parseVoiceInventoryPayload(data);
+                setPrefillData(parsed.ok === false ? parsed.partial : parsed.item);
+                setEditItem(null);
+                setShowAddForm(true);
+              }}
+            />
+            <PhotoStockUpdate
+              fixedMode="RESTOCK"
+              inventory={inventory}
+              onUpdate={async ({ name, quantityChange, itemMatch }) => {
+                if (itemMatch) {
+                  const newQty = Math.max(0, itemMatch.quantity + quantityChange);
+                  await updateItem(itemMatch.id, { quantity: newQty });
+                } else if (quantityChange > 0) {
+                  await addItem({ name, quantity: quantityChange, program: 'Grocery' });
+                } else {
+                  toast.error(`Cannot add from unknown item: ${name}`);
+                }
+              }}
+            />
+            <GlassCard className="flex h-full flex-col justify-center gap-4">
+              <div className="flex items-center gap-2">
+                <div className="rounded-xl bg-maroon-100 p-2 text-maroon-600">
+                  <Sparkles className="h-7 w-7" />
+                </div>
+                <div>
+                  <h3 className="text-lg font-bold text-slate-800">Forms &amp; files</h3>
+                  <p className="text-xs text-slate-500">Manual row, vendor invoice scan, or spreadsheet import.</p>
+                </div>
+              </div>
+              <div className="space-y-3">
                 <button
+                  type="button"
                   onClick={() => {
                     setPrefillData(null);
+                    setEditItem(null);
                     setShowAddForm(true);
                   }}
-                  className="w-full py-4 rounded-3xl font-bold text-lg wheat-grass-btn transition-all flex items-center justify-center gap-2 shadow-sm"
+                  className="flex w-full items-center justify-center gap-2 rounded-2xl py-4 text-base font-bold wheat-grass-btn"
                 >
-                  <Plus className="w-5 h-5" />
-                  Manual Entry
+                  <Plus className="h-5 w-5" />
+                  Manual entry
                 </button>
-                
-                <InvoiceOCR 
+                <InvoiceOCR
                   onExtracted={async (items) => {
                     for (const item of items) {
                       await addItem(item);
                     }
-                    alert(`Extracted and added ${items.length} items!`);
-                  }} 
+                    toast.success(`Added ${items.length} lines from invoice`);
+                  }}
                 />
-
-                <ExcelImport 
+                <ExcelImport
                   onExtracted={async (items) => {
                     for (const item of items) {
                       await addItem(item);
                     }
-                    alert(`Imported ${items.length} items from Excel!`);
+                    toast.success(`Imported ${items.length} rows`);
                   }}
                 />
               </div>
-            </div>
-          </GlassCard>
+            </GlassCard>
+          </div>
         </section>
 
-        {/* Inventory Section */}
-        <section className="space-y-6">
-          <div className="flex items-center gap-3">
-            <LayoutDashboard className="w-6 h-6 text-maroon-600" />
-            <h2 className="text-2xl font-bold text-slate-800">Inventory Dashboard</h2>
+        <section>
+          <h2 className="mb-4 text-lg font-bold text-slate-800">Remove stock</h2>
+          <p className="mb-4 text-sm text-slate-500">
+            Pull units from existing lines — photo consume, or bulk paste / Excel / voice removals.
+          </p>
+          <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
+            <PhotoStockUpdate
+              fixedMode="CONSUME"
+              inventory={inventory}
+              onUpdate={async ({ name, quantityChange, itemMatch }) => {
+                if (itemMatch) {
+                  const newQty = Math.max(0, itemMatch.quantity + quantityChange);
+                  await updateItem(itemMatch.id, { quantity: newQty });
+                } else {
+                  toast.error(`No match for "${name}" — use the table or bulk remover.`);
+                }
+              }}
+            />
+            <GlassCard className="flex flex-col justify-center gap-4">
+              <div>
+                <h3 className="text-lg font-bold text-slate-800">Bulk stock out</h3>
+                <p className="text-sm text-slate-500">
+                  Paste from Excel, upload a sheet, or speak a list of deductions. Matches your inventory names.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowBulkRemove(true)}
+                className="flex w-full items-center justify-center gap-2 rounded-2xl border-2 border-rose-200 bg-rose-50 py-4 text-base font-bold text-rose-800 transition-colors hover:bg-rose-100"
+              >
+                <ListMinus className="h-5 w-5" />
+                Open bulk remover
+              </button>
+            </GlassCard>
           </div>
-          
+        </section>
+
+        <section className="space-y-4">
+          <div className="flex flex-wrap items-end justify-between gap-4 border-b border-slate-200 pb-3">
+            <div className="flex items-center gap-2">
+              <LayoutDashboard className="h-6 w-6 text-maroon-600" />
+              <div>
+                <h2 className="text-xl font-bold text-slate-900 md:text-2xl">Inventory dashboard</h2>
+                <p className="text-xs text-slate-500">Filter by program and category · highlight low stock</p>
+              </div>
+            </div>
+          </div>
+
           <InventoryTable
             items={inventory}
             onTransfer={setTransferItem}
             onDelete={deleteItem}
             onArchive={handleArchive}
             onViewHistory={() => setShowHistory(true)}
+            onUpdateItem={updateItem}
+            onEditItem={(item) => {
+              setEditItem(item);
+              setPrefillData(null);
+              setShowAddForm(true);
+            }}
+            onOpenMergeDuplicates={() => setShowMergeModal(true)}
           />
         </section>
       </main>
@@ -453,13 +688,24 @@ export default function App() {
       <AnimatePresence>
         {showAddForm && (
           <ManualEntryForm
+            key={editItem?.id ?? 'new'}
             inventory={inventory}
             initialData={prefillData}
+            existingItem={editItem}
             onAdd={addItem}
+            onUpdate={updateItem}
             onClose={() => {
               setShowAddForm(false);
               setPrefillData(null);
+              setEditItem(null);
             }}
+          />
+        )}
+        {showMergeModal && (
+          <MergeDuplicatesModal
+            items={inventory}
+            onClose={() => setShowMergeModal(false)}
+            onMerge={mergeItems}
           />
         )}
         {transferItem && (
@@ -470,7 +716,14 @@ export default function App() {
           />
         )}
         {showHistory && (
-          <HistoryModal onClose={() => setShowHistory(false)} />
+          <HistoryModal onClose={() => setShowHistory(false)} isGuest={isGuest && !user} />
+        )}
+        {showBulkRemove && (
+          <BulkStockRemoveModal
+            inventory={inventory}
+            onClose={() => setShowBulkRemove(false)}
+            onApply={applyBulkSubtract}
+          />
         )}
       </AnimatePresence>
 

@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { Camera, Loader2 } from 'lucide-react';
 import { GoogleGenAI, Type } from '@google/genai';
+import { GEMINI_MODEL } from '@/src/config/gemini';
 import { cn } from '@/src/lib/utils';
 
 interface InvoiceOCRProps {
@@ -33,7 +34,7 @@ export function InvoiceOCR({ onExtracted }: InvoiceOCRProps) {
       }
       const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY! });
       const response = await ai.models.generateContent({
-        model: 'gemini-3.1-pro',
+        model: GEMINI_MODEL,
         contents: [
           {
             inlineData: {
