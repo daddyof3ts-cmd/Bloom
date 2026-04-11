@@ -1,5 +1,5 @@
 # Bloom
-
+https://bloom-e18dd.web.app/
 Inventory management for the Virginia Tech Food Pantry: **Open-Hours** and **Grocery** programs, with optional AI-assisted intake, checkpoints, and Google Sheets export.
 
 ## Prerequisites
