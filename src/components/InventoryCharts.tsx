@@ -43,12 +43,12 @@ export function InventoryCharts({ items }: InventoryChartsProps) {
   }
 
   return (
-    <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
-      <div className="rounded-2xl border border-slate-200 bg-white/90 p-4 shadow-sm">
+    <div className="grid min-w-0 grid-cols-1 gap-6 lg:grid-cols-2">
+      <div className="min-w-0 rounded-2xl border border-slate-200 bg-white/90 p-4 shadow-sm">
         <h3 className="mb-1 text-sm font-bold uppercase tracking-wide text-slate-500">Units by category</h3>
         <p className="mb-2 text-xs text-slate-400">Total units grouped by category label</p>
-        <div className="h-[260px] w-full min-h-[220px]">
-          <ResponsiveContainer width="100%" height="100%">
+        <div className="h-[260px] w-full min-h-[220px] min-w-0">
+          <ResponsiveContainer width="100%" height="100%" minWidth={0} minHeight={220}>
             <PieChart>
               <Pie
                 data={pieData}
@@ -71,11 +71,11 @@ export function InventoryCharts({ items }: InventoryChartsProps) {
         </div>
       </div>
 
-      <div className="rounded-2xl border border-slate-200 bg-white/90 p-4 shadow-sm">
+      <div className="min-w-0 rounded-2xl border border-slate-200 bg-white/90 p-4 shadow-sm">
         <h3 className="mb-1 text-sm font-bold uppercase tracking-wide text-slate-500">Units by program</h3>
         <p className="mb-2 text-xs text-slate-400">Open-Hours pantry vs Grocery setup</p>
-        <div className="h-[260px] w-full min-h-[220px]">
-          <ResponsiveContainer width="100%" height="100%">
+        <div className="h-[260px] w-full min-h-[220px] min-w-0">
+          <ResponsiveContainer width="100%" height="100%" minWidth={0} minHeight={220}>
             <BarChart data={barData} margin={{ top: 16, right: 16, left: 0, bottom: 8 }}>
               <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
               <XAxis dataKey="program" tick={{ fontSize: 12, fill: '#64748b' }} />

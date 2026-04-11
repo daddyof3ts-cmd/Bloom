@@ -133,6 +133,7 @@ export function InventoryTable({
   const [filter, setFilter] = useState<Program | 'All'>('All');
   const [categoryFilter, setCategoryFilter] = useState<string>('All');
   const [lowStockOnly, setLowStockOnly] = useState(false);
+  const [incompleteOnly, setIncompleteOnly] = useState(false);
 
   const categories = useMemo(() => distinctCategories(items), [items]);
 
@@ -158,10 +159,14 @@ export function InventoryTable({
     if (lowStockOnly) {
       result = result.filter(isLowStock);
     }
+    if (incompleteOnly) {
+      result = result.filter(isItemIncomplete);
+    }
     return result;
-  }, [search, filter, categoryFilter, lowStockOnly, items, fuse]);
+  }, [search, filter, categoryFilter, lowStockOnly, incompleteOnly, items, fuse]);
 
   const lowCount = useMemo(() => items.filter(isLowStock).length, [items]);
+  const incompleteCount = useMemo(() => items.filter(isItemIncomplete).length, [items]);
 
   return (
     <div className="space-y-4">
@@ -183,6 +188,28 @@ export function InventoryTable({
             )}
           >
             {lowStockOnly ? 'Show all lines' : 'Show only low stock'}
+          </button>
+        </div>
+      )}
+
+      {incompleteCount > 0 && (
+        <div className="flex flex-wrap items-center gap-3 rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-900">
+          <AlertTriangle className="h-5 w-5 shrink-0 text-rose-600" />
+          <span>
+            <strong>{incompleteCount}</strong> line{incompleteCount === 1 ? '' : 's'} missing vendor, category, or pack
+            weight.
+          </span>
+          <button
+            type="button"
+            onClick={() => setIncompleteOnly((v) => !v)}
+            className={cn(
+              'ml-auto rounded-full border px-3 py-1 text-xs font-bold transition-colors',
+              incompleteOnly
+                ? 'border-rose-600 bg-rose-600 text-white'
+                : 'border-rose-300 bg-white text-rose-800 hover:bg-rose-100'
+            )}
+          >
+            {incompleteOnly ? 'Show all lines' : 'Show only missing details'}
           </button>
         </div>
       )}

@@ -1,0 +1,31 @@
+# Build and deploy to Firebase Hosting on pushes to main.
+# Repository secrets: FIREBASE_TOKEN (from `firebase login:ci`);
+# optional GEMINI_API_KEY, VITE_SHEETS_WEBHOOK_URL
+
+name: Deploy Firebase Hosting
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - run: npm ci
+
+      - name: Build
+        run: npm run build
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          VITE_SHEETS_WEBHOOK_URL: ${{ secrets.VITE_SHEETS_WEBHOOK_URL }}
+
+      - name: Deploy Hosting and Firestore rules
+        run: npm run deploy:firebase -- --non-interactive --token "${{ secrets.FIREBASE_TOKEN }}"

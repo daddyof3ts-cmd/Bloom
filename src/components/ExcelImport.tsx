@@ -8,6 +8,12 @@ import {
   worksheetToGrid,
   type NormalizedInventoryRow,
 } from '@/src/lib/normalizeSpreadsheetWithGemini';
+import { toast } from 'sonner';
+
+function geminiKeyLooksInvalid(err: unknown): boolean {
+  const raw = err instanceof Error ? err.message : String(err);
+  return raw.includes('API_KEY_INVALID') || raw.includes('API key not valid');
+}
 
 interface ExcelImportProps {
   onExtracted: (items: any[]) => void;
@@ -53,9 +59,13 @@ export function ExcelImport({ onExtracted }: ExcelImportProps) {
           items = await normalizeSpreadsheetWithGemini(grid, process.env.GEMINI_API_KEY);
         } catch (err) {
           console.error('Gemini spreadsheet normalization failed:', err);
-          alert(
-            'AI could not organize this file. Using basic column matching instead. Check the console for details.'
-          );
+          if (geminiKeyLooksInvalid(err)) {
+            toast.error(
+              'Gemini API key is missing, invalid, or expired. Using basic column matching. Set GEMINI_API_KEY in .env and restart the dev server.'
+            );
+          } else {
+            toast.message('AI could not organize this file — using basic column matching instead.');
+          }
           const json = XLSX.utils.sheet_to_json<Record<string, unknown>>(worksheet);
           items = heuristicMapObjects(json);
         }

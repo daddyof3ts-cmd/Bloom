@@ -1,16 +1,16 @@
-import { useState, useEffect, useMemo } from 'react';
-import { 
-  collection, 
-  onSnapshot, 
-  addDoc, 
-  updateDoc, 
-  deleteDoc, 
-  doc, 
-  query, 
-  orderBy, 
+import { useState, useEffect, useMemo, useRef, useCallback } from 'react';
+import {
+  collection,
+  onSnapshot,
+  addDoc,
+  updateDoc,
+  deleteDoc,
+  doc,
+  query,
+  orderBy,
   Timestamp,
   writeBatch,
-  getDocs
+  setDoc,
 } from 'firebase/firestore';
 import { signInWithPopup, GoogleAuthProvider, onAuthStateChanged, User } from 'firebase/auth';
 import { db, auth } from './firebase';
@@ -32,10 +32,26 @@ import { countIncompleteItems } from './lib/inventoryCompleteness';
 import { saveGuestCheckpoint } from './lib/localCheckpoints';
 import { unitsByCategory, countLowStock, LOW_STOCK_THRESHOLD } from './lib/inventoryStats';
 import { toast } from 'sonner';
-import { LogIn, LogOut, Package, Plus, Sparkles, LayoutDashboard, ListMinus, Boxes, AlertTriangle, TrendingDown } from 'lucide-react';
+import {
+  LogIn,
+  LogOut,
+  Package,
+  Plus,
+  Sparkles,
+  LayoutDashboard,
+  ListMinus,
+  Boxes,
+  AlertTriangle,
+  TrendingDown,
+  Undo2,
+  Redo2,
+  CircleHelp,
+} from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { BulkStockRemoveModal } from './components/BulkStockRemoveModal';
 import { InventoryCharts } from './components/InventoryCharts';
+import { HelpModal } from './components/HelpModal';
+import { cappedPush, patchBefore, type ItemPatch, type UndoEntry } from './lib/inventoryUndo';
 
 export default function App() {
   const [user, setUser] = useState<User | null>(null);
@@ -49,31 +65,58 @@ export default function App() {
   const [showMergeModal, setShowMergeModal] = useState(false);
   const [editItem, setEditItem] = useState<InventoryItem | null>(null);
   const [showBulkRemove, setShowBulkRemove] = useState(false);
+  const [showHelp, setShowHelp] = useState(false);
+  const [undoStack, setUndoStack] = useState<UndoEntry[]>([]);
+  const [redoStack, setRedoStack] = useState<UndoEntry[]>([]);
+  const pauseUndoRecording = useRef(false);
 
-  type ItemPatch = Partial<Pick<InventoryItem, 'name' | 'vendor' | 'weight' | 'category' | 'pricing' | 'quantity' | 'program'>>;
+  const isGuestMode = isGuest && !user;
+
+  const recordUndo = useCallback((entry: UndoEntry) => {
+    if (pauseUndoRecording.current) return;
+    setRedoStack([]);
+    setUndoStack((s) => cappedPush(s, entry));
+  }, []);
 
   const updateItem = async (id: string, patch: ItemPatch) => {
     const existing = inventory.find((i) => i.id === id);
     if (!existing) return;
+    const before = patchBefore(existing, patch);
     const merged: InventoryItem = {
       ...existing,
       ...patch,
       lastUpdated: Timestamp.now(),
     };
-    if (isGuest && !user) {
+    if (isGuestMode) {
+      if (!pauseUndoRecording.current) {
+        recordUndo({ kind: 'patch', id, before, after: patch });
+      }
       setInventory((prev) => prev.map((i) => (i.id === id ? merged : i)));
-    } else {
+      void syncToSheets('UPDATE', merged);
+      return;
+    }
+    setInventory((prev) => prev.map((i) => (i.id === id ? merged : i)));
+    if (!pauseUndoRecording.current) {
+      recordUndo({ kind: 'patch', id, before, after: patch });
+    }
+    void (async () => {
       try {
         await updateDoc(doc(db, 'inventory', id), {
           ...patch,
           lastUpdated: Timestamp.now(),
         });
+        void syncToSheets('UPDATE', merged);
       } catch (error) {
         console.warn('Firebase update failed:', error);
+        setInventory((prev) => prev.map((i) => (i.id === id ? existing : i)));
+        setUndoStack((s) => {
+          const last = s[s.length - 1];
+          if (last?.kind === 'patch' && last.id === id) return s.slice(0, -1);
+          return s;
+        });
         toast.error('Failed to update item.');
       }
-    }
-    void syncToSheets('UPDATE', merged);
+    })();
   };
 
   const mergeItems = async (keepId: string, removeId: string) => {
@@ -82,7 +125,7 @@ export default function App() {
     if (!keep || !remove) return;
     const newQty = keep.quantity + remove.quantity;
 
-    if (isGuest && !user) {
+    if (isGuestMode) {
       setInventory((prev) => {
         const next = prev.filter((i) => i.id !== removeId);
         return next.map((i) =>
@@ -218,81 +261,395 @@ export default function App() {
   const handleLogout = () => auth.signOut();
 
   const addItem = async (data: any) => {
-    const newItem = { ...data, lastUpdated: Timestamp.now() };
-    if (isGuest && !user) {
-      setInventory(prev => [{ ...newItem, id: crypto.randomUUID() } as InventoryItem, ...prev]);
-    } else {
+    const lastUpdated = Timestamp.now();
+    const newItem = { ...data, lastUpdated };
+
+    if (isGuestMode) {
+      const id = crypto.randomUUID();
+      const full = { ...newItem, id } as InventoryItem;
+      setInventory((prev) => [full, ...prev]);
+      if (!pauseUndoRecording.current) {
+        recordUndo({ kind: 'add', id, doc: { ...newItem } as Record<string, unknown> });
+      }
+      void syncToSheets('ADD', data);
+      return;
+    }
+
+    const newRef = doc(collection(db, 'inventory'));
+    const id = newRef.id;
+    const optimistic = { id, ...newItem } as InventoryItem;
+    setInventory((prev) => (prev.some((i) => i.id === id) ? prev : [optimistic, ...prev]));
+    if (!pauseUndoRecording.current) {
+      recordUndo({ kind: 'add', id, doc: { ...newItem } as Record<string, unknown> });
+    }
+    void (async () => {
       try {
-        await addDoc(collection(db, 'inventory'), newItem);
+        await setDoc(newRef, newItem);
+        void syncToSheets('ADD', data);
       } catch (error) {
         console.warn('Firebase add bypassed:', error);
+        setInventory((prev) => prev.filter((i) => i.id !== id));
+        setUndoStack((s) => {
+          const last = s[s.length - 1];
+          if (last?.kind === 'add' && last.id === id) return s.slice(0, -1);
+          return s;
+        });
         toast.error('Failed to add item to database.');
       }
-    }
-    void syncToSheets('ADD', data);
+    })();
   };
 
   const deleteItem = async (id: string) => {
-    const itemToDelete = inventory.find(i => i.id === id);
-    if (isGuest && !user) {
-      setInventory(prev => prev.filter(i => i.id !== id));
-    } else {
+    const itemToDelete = inventory.find((i) => i.id === id);
+    if (!itemToDelete) return;
+
+    if (isGuestMode) {
+      setInventory((prev) => prev.filter((i) => i.id !== id));
+      if (!pauseUndoRecording.current) {
+        recordUndo({ kind: 'delete', item: { ...itemToDelete } });
+      }
+      void syncToSheets('DELETE', itemToDelete);
+      return;
+    }
+
+    setInventory((prev) => prev.filter((i) => i.id !== id));
+    if (!pauseUndoRecording.current) {
+      recordUndo({ kind: 'delete', item: { ...itemToDelete } });
+    }
+    void (async () => {
       try {
         await deleteDoc(doc(db, 'inventory', id));
+        void syncToSheets('DELETE', itemToDelete);
       } catch (error) {
         console.warn('Firebase delete bypassed:', error);
+        setInventory((prev) => (prev.some((i) => i.id === id) ? prev : [itemToDelete, ...prev]));
+        setUndoStack((s) => {
+          const last = s[s.length - 1];
+          if (last?.kind === 'delete' && last.item.id === id) return s.slice(0, -1);
+          return s;
+        });
         toast.error('Failed to delete item from database.');
       }
-    }
-    if (itemToDelete) void syncToSheets('DELETE', itemToDelete);
+    })();
   };
 
   const applyBulkSubtract = async (ops: { id: string; subtract: number }[]) => {
     if (ops.length === 0) return;
+    const previousInventory = inventory;
     const next = inventory.map((i) => ({ ...i }));
+    const changes: { id: string; beforeQty: number; afterQty: number }[] = [];
     for (const { id, subtract } of ops) {
       const idx = next.findIndex((x) => x.id === id);
       if (idx >= 0) {
+        const beforeQty = next[idx].quantity;
+        const afterQty = Math.max(0, next[idx].quantity - subtract);
+        if (beforeQty !== afterQty) {
+          changes.push({ id, beforeQty, afterQty });
+        }
         next[idx] = {
           ...next[idx],
-          quantity: Math.max(0, next[idx].quantity - subtract),
+          quantity: afterQty,
           lastUpdated: Timestamp.now(),
         };
       }
     }
+    if (changes.length === 0) return;
 
-    if (isGuest && !user) {
+    if (isGuestMode) {
       setInventory(next);
-      const touched = new Set(ops.map((o) => o.id));
-      for (const id of touched) {
-        const item = next.find((i) => i.id === id);
+      if (!pauseUndoRecording.current) {
+        recordUndo({ kind: 'bulkQty', changes });
+      }
+      for (const c of changes) {
+        const item = next.find((i) => i.id === c.id);
         if (item) void syncToSheets('UPDATE', item);
       }
       return;
     }
 
-    const touched = new Set(ops.map((o) => o.id));
-    for (const id of touched) {
-      const newItem = next.find((i) => i.id === id);
-      if (!newItem) continue;
-      try {
-        await updateDoc(doc(db, 'inventory', id), {
-          quantity: newItem.quantity,
-          lastUpdated: Timestamp.now(),
-        });
-      } catch (e) {
-        console.warn('Bulk subtract failed', e);
-        toast.error('Failed to update one or more items.');
-        throw e;
+    setInventory(next);
+    const chunkSize = 450;
+    try {
+      for (let i = 0; i < changes.length; i += chunkSize) {
+        const batch = writeBatch(db);
+        const slice = changes.slice(i, i + chunkSize);
+        for (const c of slice) {
+          const row = next.find((x) => x.id === c.id);
+          if (!row) continue;
+          batch.update(doc(db, 'inventory', c.id), {
+            quantity: row.quantity,
+            lastUpdated: Timestamp.now(),
+          });
+        }
+        await batch.commit();
       }
-      void syncToSheets('UPDATE', newItem);
+    } catch (e) {
+      console.warn('Bulk subtract failed', e);
+      setInventory(previousInventory);
+      toast.error('Failed to update one or more items.');
+      throw e;
+    }
+    if (!pauseUndoRecording.current) {
+      recordUndo({ kind: 'bulkQty', changes });
+    }
+    for (const c of changes) {
+      const item = next.find((i) => i.id === c.id);
+      if (item) void syncToSheets('UPDATE', item);
+    }
+  };
+
+  const applyPatchToFirestore = async (id: string, patch: ItemPatch) => {
+    await updateDoc(doc(db, 'inventory', id), {
+      ...patch,
+      lastUpdated: Timestamp.now(),
+    });
+  };
+
+  const applyUndoEntry = async (entry: UndoEntry) => {
+    const now = Timestamp.now();
+    if (entry.kind === 'patch') {
+      if (isGuestMode) {
+        setInventory((prev) =>
+          prev.map((i) => (i.id === entry.id ? { ...i, ...entry.before, lastUpdated: now } : i))
+        );
+      } else {
+        setInventory((prev) =>
+          prev.map((i) => (i.id === entry.id ? { ...i, ...entry.before, lastUpdated: now } : i))
+        );
+        await applyPatchToFirestore(entry.id, entry.before);
+      }
+      return;
+    }
+    if (entry.kind === 'bulkQty') {
+      if (isGuestMode) {
+        setInventory((prev) =>
+          prev.map((i) => {
+            const c = entry.changes.find((x) => x.id === i.id);
+            return c ? { ...i, quantity: c.beforeQty, lastUpdated: now } : i;
+          })
+        );
+      } else {
+        setInventory((prev) =>
+          prev.map((i) => {
+            const c = entry.changes.find((x) => x.id === i.id);
+            return c ? { ...i, quantity: c.beforeQty, lastUpdated: now } : i;
+          })
+        );
+        for (let i = 0; i < entry.changes.length; i += 450) {
+          const batch = writeBatch(db);
+          const slice = entry.changes.slice(i, i + 450);
+          for (const c of slice) {
+            batch.update(doc(db, 'inventory', c.id), { quantity: c.beforeQty, lastUpdated: now });
+          }
+          await batch.commit();
+        }
+      }
+      return;
+    }
+    if (entry.kind === 'add') {
+      if (isGuestMode) {
+        setInventory((prev) => prev.filter((i) => i.id !== entry.id));
+      } else {
+        await deleteDoc(doc(db, 'inventory', entry.id));
+        setInventory((prev) => prev.filter((i) => i.id !== entry.id));
+      }
+      return;
+    }
+    if (entry.kind === 'delete') {
+      const { id } = entry.item;
+      const payload = {
+        name: entry.item.name,
+        vendor: entry.item.vendor || '',
+        weight: entry.item.weight || '',
+        category: entry.item.category || '',
+        pricing: entry.item.pricing || '',
+        quantity: entry.item.quantity,
+        program: entry.item.program,
+        lastUpdated: now,
+      };
+      if (isGuestMode) {
+        setInventory((prev) => [{ ...entry.item, lastUpdated: now }, ...prev]);
+      } else {
+        await setDoc(doc(db, 'inventory', id), payload);
+        setInventory((prev) => [{ ...entry.item, lastUpdated: now }, ...prev]);
+      }
+    }
+  };
+
+  const applyRedoEntry = async (entry: UndoEntry) => {
+    const now = Timestamp.now();
+    if (entry.kind === 'patch') {
+      if (isGuestMode) {
+        setInventory((prev) =>
+          prev.map((i) => (i.id === entry.id ? { ...i, ...entry.after, lastUpdated: now } : i))
+        );
+      } else {
+        setInventory((prev) =>
+          prev.map((i) => (i.id === entry.id ? { ...i, ...entry.after, lastUpdated: now } : i))
+        );
+        await applyPatchToFirestore(entry.id, entry.after);
+      }
+      return;
+    }
+    if (entry.kind === 'bulkQty') {
+      if (isGuestMode) {
+        setInventory((prev) =>
+          prev.map((i) => {
+            const c = entry.changes.find((x) => x.id === i.id);
+            return c ? { ...i, quantity: c.afterQty, lastUpdated: now } : i;
+          })
+        );
+      } else {
+        setInventory((prev) =>
+          prev.map((i) => {
+            const c = entry.changes.find((x) => x.id === i.id);
+            return c ? { ...i, quantity: c.afterQty, lastUpdated: now } : i;
+          })
+        );
+        for (let i = 0; i < entry.changes.length; i += 450) {
+          const batch = writeBatch(db);
+          const slice = entry.changes.slice(i, i + 450);
+          for (const c of slice) {
+            batch.update(doc(db, 'inventory', c.id), { quantity: c.afterQty, lastUpdated: now });
+          }
+          await batch.commit();
+        }
+      }
+      return;
+    }
+    if (entry.kind === 'add') {
+      if (isGuestMode) {
+        setInventory((prev) => [{ id: entry.id, ...(entry.doc as Omit<InventoryItem, 'id'>) }, ...prev]);
+      } else {
+        await setDoc(doc(db, 'inventory', entry.id), entry.doc);
+        setInventory((prev) => [
+          { id: entry.id, ...(entry.doc as Omit<InventoryItem, 'id'>) } as InventoryItem,
+          ...prev,
+        ]);
+      }
+      return;
+    }
+    if (entry.kind === 'delete') {
+      if (isGuestMode) {
+        setInventory((prev) => prev.filter((i) => i.id !== entry.item.id));
+      } else {
+        await deleteDoc(doc(db, 'inventory', entry.item.id));
+        setInventory((prev) => prev.filter((i) => i.id !== entry.item.id));
+      }
+    }
+  };
+
+  const performUndo = async () => {
+    let entry: UndoEntry | undefined;
+    setUndoStack((s) => {
+      if (s.length === 0) return s;
+      entry = s[s.length - 1];
+      return s.slice(0, -1);
+    });
+    if (entry === undefined) return;
+    setRedoStack((r) => cappedPush(r, entry));
+    pauseUndoRecording.current = true;
+    try {
+      await applyUndoEntry(entry);
+    } catch (e) {
+      console.warn('Undo failed', e);
+      toast.error('Could not undo.');
+      setRedoStack((r) => r.slice(0, -1));
+      setUndoStack((u) => cappedPush(u, entry!));
+    } finally {
+      pauseUndoRecording.current = false;
+    }
+  };
+
+  const performRedo = async () => {
+    let entry: UndoEntry | undefined;
+    setRedoStack((r) => {
+      if (r.length === 0) return r;
+      entry = r[r.length - 1];
+      return r.slice(0, -1);
+    });
+    if (entry === undefined) return;
+    setUndoStack((u) => cappedPush(u, entry));
+    pauseUndoRecording.current = true;
+    try {
+      await applyRedoEntry(entry);
+    } catch (e) {
+      console.warn('Redo failed', e);
+      toast.error('Could not redo.');
+      setUndoStack((u) => u.slice(0, -1));
+      setRedoStack((r) => cappedPush(r, entry!));
+    } finally {
+      pauseUndoRecording.current = false;
+    }
+  };
+
+  const undoRedoRef = useRef({ undo: performUndo, redo: performRedo });
+  undoRedoRef.current = { undo: performUndo, redo: performRedo };
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const t = e.target as HTMLElement;
+      if (t?.closest('input, textarea, [contenteditable="true"]')) return;
+      if ((e.ctrlKey || e.metaKey) && e.key === 'z') {
+        e.preventDefault();
+        if (e.shiftKey) void undoRedoRef.current.redo();
+        else void undoRedoRef.current.undo();
+      }
+      if ((e.ctrlKey || e.metaKey) && e.key === 'y') {
+        e.preventDefault();
+        void undoRedoRef.current.redo();
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
+
+  const addItemsBatched = async (items: any[]) => {
+    if (items.length === 0) return;
+    pauseUndoRecording.current = true;
+    try {
+      if (isGuestMode) {
+        const newRows: InventoryItem[] = items.map((data) => {
+          const lastUpdated = Timestamp.now();
+          return { ...data, lastUpdated, id: crypto.randomUUID() } as InventoryItem;
+        });
+        setInventory((prev) => [...newRows, ...prev]);
+      } else {
+        const prepared = items.map((data) => {
+          const lastUpdated = Timestamp.now();
+          const ref = doc(collection(db, 'inventory'));
+          return { ref, id: ref.id, payload: { ...data, lastUpdated } };
+        });
+        const chunkSize = 450;
+        for (let i = 0; i < prepared.length; i += chunkSize) {
+          const batch = writeBatch(db);
+          const slice = prepared.slice(i, i + chunkSize);
+          for (const row of slice) {
+            batch.set(row.ref, row.payload);
+          }
+          await batch.commit();
+        }
+        const optimistic = prepared.map(
+          (row) => ({ id: row.id, ...row.payload } as InventoryItem)
+        );
+        setInventory((prev) => {
+          const ids = new Set(optimistic.map((o) => o.id));
+          const rest = prev.filter((p) => !ids.has(p.id));
+          return [...optimistic, ...rest];
+        });
+      }
+      for (const item of items) {
+        void syncToSheets('ADD', item);
+      }
+    } finally {
+      pauseUndoRecording.current = false;
     }
   };
 
   const handleTransfer = async (amount: number, toProgram: Program) => {
     if (!transferItem) return;
 
-    if (isGuest && !user) {
+    if (isGuestMode) {
       setInventory(prev => {
         const next = [...prev];
         const sourceIndex = next.findIndex(i => i.id === transferItem.id);
@@ -461,7 +818,7 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-white pb-24">
-      <header className="sticky top-0 z-40 flex items-center border-b border-slate-200 bg-white/95 px-4 py-3 backdrop-blur-md md:px-8">
+      <header className="sticky top-0 z-40 flex w-full items-center justify-between gap-4 border-b border-slate-200 bg-white/95 px-4 py-3 backdrop-blur-md md:px-8">
         <div className="relative z-10 flex items-center gap-3">
           <div className="hidden items-center gap-3 rounded-2xl border border-slate-200 bg-white px-3 py-2 shadow-sm md:flex">
             <img
@@ -492,6 +849,35 @@ export default function App() {
             <Package className="h-6 w-6" />
           </div>
           <h1 className="pointer-events-auto text-xl font-bold tracking-tight text-slate-900">Bloom</h1>
+        </div>
+
+        <div className="relative z-10 ml-auto flex items-center gap-1">
+          <button
+            type="button"
+            onClick={() => void performUndo()}
+            disabled={undoStack.length === 0}
+            title="Undo (Ctrl+Z)"
+            className="rounded-2xl border border-slate-200 bg-white p-2.5 text-slate-700 shadow-sm transition-colors hover:bg-slate-50 disabled:pointer-events-none disabled:opacity-40"
+          >
+            <Undo2 className="h-5 w-5" />
+          </button>
+          <button
+            type="button"
+            onClick={() => void performRedo()}
+            disabled={redoStack.length === 0}
+            title="Redo (Ctrl+Y)"
+            className="rounded-2xl border border-slate-200 bg-white p-2.5 text-slate-700 shadow-sm transition-colors hover:bg-slate-50 disabled:pointer-events-none disabled:opacity-40"
+          >
+            <Redo2 className="h-5 w-5" />
+          </button>
+          <button
+            type="button"
+            onClick={() => setShowHelp(true)}
+            title="Help"
+            className="rounded-2xl border border-slate-200 bg-white p-2.5 text-maroon-700 shadow-sm transition-colors hover:bg-slate-50"
+          >
+            <CircleHelp className="h-5 w-5" />
+          </button>
         </div>
       </header>
 
@@ -600,17 +986,13 @@ export default function App() {
                 </button>
                 <InvoiceOCR
                   onExtracted={async (items) => {
-                    for (const item of items) {
-                      await addItem(item);
-                    }
+                    await addItemsBatched(items);
                     toast.success(`Added ${items.length} lines from invoice`);
                   }}
                 />
                 <ExcelImport
                   onExtracted={async (items) => {
-                    for (const item of items) {
-                      await addItem(item);
-                    }
+                    await addItemsBatched(items);
                     toast.success(`Imported ${items.length} rows`);
                   }}
                 />
@@ -662,7 +1044,9 @@ export default function App() {
               <LayoutDashboard className="h-6 w-6 text-maroon-600" />
               <div>
                 <h2 className="text-xl font-bold text-slate-900 md:text-2xl">Inventory dashboard</h2>
-                <p className="text-xs text-slate-500">Filter by program and category · highlight low stock</p>
+                <p className="text-xs text-slate-500">
+                  Filter by program and category · low stock and missing-detail highlights
+                </p>
               </div>
             </div>
           </div>
@@ -726,6 +1110,8 @@ export default function App() {
           />
         )}
       </AnimatePresence>
+
+      {showHelp && <HelpModal onClose={() => setShowHelp(false)} />}
 
       {/* Chatbot */}
       <AIChatbot inventory={inventory} />

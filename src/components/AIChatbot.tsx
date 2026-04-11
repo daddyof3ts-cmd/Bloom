@@ -98,14 +98,15 @@ export function AIChatbot({ inventory }: AIChatbotProps) {
   return (
     <>
       <button
+        type="button"
         onClick={() => setIsOpen(!isOpen)}
-        className="fixed top-5 right-8 w-14 h-14 wheat-grass-btn rounded-full flex items-center justify-center hover:scale-110 transition-transform z-50 shadow-md"
+        className="fixed bottom-5 right-8 z-50 flex h-14 w-14 items-center justify-center rounded-full wheat-grass-btn shadow-md transition-transform hover:scale-110"
       >
-        <MessageCircle className="w-7 h-7" />
+        <MessageCircle className="h-7 w-7" />
       </button>
 
       {isOpen && (
-        <div className="fixed top-24 right-8 w-96 max-h-[85vh] h-[600px] liquid-glass rounded-[40px] shadow-2xl flex flex-col overflow-hidden z-50 border border-white/30 animate-in fade-in zoom-in-95 duration-300">
+        <div className="fixed bottom-24 right-8 z-50 flex h-[min(600px,85vh)] max-h-[85vh] w-96 flex-col overflow-hidden rounded-[40px] border border-white/30 liquid-glass shadow-2xl animate-in fade-in zoom-in-95 duration-300">
           <div className="p-6 bg-maroon-600/10 border-b border-white/20 flex items-center justify-between">
             <div className="flex items-center gap-3">
               <div className="p-2 bg-maroon-600 rounded-xl text-white">
